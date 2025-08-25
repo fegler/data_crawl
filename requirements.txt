@@ -1,0 +1,7 @@
+google-api-python-client
+yt-dlp
+ultralytics
+python-dotenv
+opencv-python
+scenedetect[opencv]
+av
