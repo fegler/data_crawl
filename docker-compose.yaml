@@ -1,17 +1,22 @@
 version: "3.8"
 
 x-airflow-common: &airflow-common
-  image: apache/airflow:2.8.1
+  build: .
+  image: custom-airflow:2.9.1
   environment: &airflow-common-env
     AIRFLOW__CORE__EXECUTOR: LocalExecutor
     AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
     AIRFLOW__CORE__FERNET_KEY: ""
     AIRFLOW__CORE__LOAD_EXAMPLES: "false"
     AIRFLOW__API__AUTH_BACKENDS: "airflow.api.auth.backend.basic_auth,airflow.api.auth.backend.session"
+    AIRFLOW__WEBSERVER__DAG_RUN_CONF_OVERRIDES_PARAMS: "true"
+    PYTHONPATH: /opt/airflow:/opt/airflow/pipeline_logic
   volumes:
     - ${AIRFLOW_PROJ_DIR:-./airflow}/dags:/opt/airflow/dags
     - ${AIRFLOW_PROJ_DIR:-./airflow}/logs:/opt/airflow/logs
     - ${AIRFLOW_PROJ_DIR:-./airflow}/plugins:/opt/airflow/plugins
+    - ${DATA_DIR:-./data}:/data
+    - ${LOGIC_DIR:-./pipeline_logic}:/opt/airflow/pipeline_logic
   user: "${AIRFLOW_UID:-50000}:0"
   depends_on:
     postgres:

@@ -1,11 +1,67 @@
 import os 
-import cv2 
-import numpy as np 
 import subprocess 
-from ultralytics import YOLO 
-from tqdm import tqdm 
+from glob import glob 
 import shutil 
+from tqdm import tqdm
+import cv2
+from pathlib import Path
 
+from scenedetect import SceneManager, open_video
+from scenedetect.detectors import ContentDetector
+from scenedetect.video_splitter import split_video_ffmpeg
+from ultralytics import YOLO
+
+####################
+#  segment & clip  #
+####################
+
+def split_raw_to_segments(video_path, data_dir, seg_duration=5) -> str:
+    filename = os.path.splitext(os.path.basename(video_path))[0]
+    output_dir = os.path.join(data_dir, 'segments', filename)
+    os.makedirs(output_dir, exist_ok=True)
+    output_template = os.path.join(output_dir, "%03d.mp4")
+
+    command = [
+        "ffmpeg",
+        "-i", video_path,
+        "-c:v", "libx264",
+        "-preset", "ultrafast",
+        "-force_key_frames", f"expr:gte(t,n_forced*{seg_duration})",
+        "-segment_time", str(seg_duration),
+        "-f", "segment",
+        "-reset_timestamps", "1",
+        output_template
+    ]
+    subprocess.run(command, check=True)
+    return output_dir
+
+def save_clip_with_sampling(segment_dir, data_dir, sample_rate=5) -> str:
+    video_name = segment_dir.split('/')[-1]
+    output_dir = os.path.join(data_dir, 'clips', video_name)
+    os.makedirs(output_dir, exist_ok=True)
+    segment_paths = glob(os.path.join(segment_dir, '*.mp4'))
+
+    for s_path in segment_paths:
+        filename = os.path.splitext(os.path.basename(s_path))[0]
+        output_template = os.path.join(output_dir, f"{filename}_%03d.mp4")
+
+        command = [
+            "ffmpeg",
+            "-i", s_path,
+            "-c:v", "libx264",
+            "-preset", "ultrafast",
+            "-vf", f"select='not(mod(n,{sample_rate}))',setpts=N/FRAME_RATE/TB",
+            "-reset_timestamps", "1",
+            "-f", "segment",
+            output_template
+        ]
+
+        subprocess.run(command, check=True)
+
+
+######################
+##  Person Clip
+######################
 def extract_person_clips(
     video_path,
     output_dir,
@@ -101,7 +157,35 @@ def extract_person_clips(
     shutil.rmtree(temp_root)
     print("[DONE] All person clips saved.")
 
-if __name__ == '__main__':
-    test_video_path = "/Users/djyun/project/data_crawl/data/video/scene_split/[지금뉴스] 케데헌 만든 소니 “1조 벌었는데 수익은 270억”…이유가？ ⧸ KBS 2025.08.18.-Scene-031.mp4"
-    output_dir = '/Users/djyun/project/data_crawl/data/video/person_clips'
-    extract_person_clips(test_video_path, output_dir)
+
+
+####################
+##    Scene Detect #
+####################
+
+def extract_scenes_with_split(
+    input_path: str,
+    output_dir: str,
+    threshold: float = 30.0,
+    min_scene_len: int = 15
+):
+    os.makedirs(output_dir, exist_ok=True)
+    video = open_video(input_path)
+
+    # 씬 매니저 설정
+    scene_manager = SceneManager()
+    scene_manager.add_detector(ContentDetector(threshold=threshold, min_scene_len=min_scene_len))
+
+    # 씬 감지 실행
+    scene_manager.detect_scenes(video)
+    scene_list = scene_manager.get_scene_list()
+
+    print(f"[INFO] {len(scene_list)} scenes detected.")
+
+    # FFMPEG로 분할 저장 (파일명 자동 지정: <input_basename>_Scene-001.mp4 형식)
+    split_video_ffmpeg(
+        input_video_path=input_path,
+        scene_list=scene_list,
+        output_dir=Path(output_dir),
+        show_progress=True
+    )

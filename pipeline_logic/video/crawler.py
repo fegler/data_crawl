@@ -36,15 +36,32 @@ def search_youtube_videos(query, max_results=5):
 
     return video_infos
 
-def download_video(url, output_dir, resolution='360'):
+def clean_filename(title):
+    # 파일명에 쓸모 없는 문자 제거
+    return "".join(c for c in title if c.isalnum() or c in " ._-").rstrip()
+
+def download_video(url, data_dir, resolution='360'):
+    output_dir = os.path.join(data_dir, "raw")
+
     ## using YouTube-dlp
+
+    ## get title 
+    result = subprocess.run(
+        ["yt-dlp", "--print", "%(title)s", url],
+        stdout=subprocess.PIPE, text=True
+    )
+    raw_title = result.stdout.strip()
+    title = clean_filename(raw_title)[:70] # 최대 70자 
+    output_path = os.path.join(output_dir, f"{title}.mp4")
+
     command = [
         "yt-dlp",
         "-f", f"bestvide[height<={resolution}]+bestaudio/best",
-        "-o", os.path.join(output_dir, "%(title).70s.%(ext)s"),
+        "-o", output_path,
         url
     ]
     subprocess.run(command)
+    return output_path
 
 def save_metadata(video_infos, output_path):
     with open(output_path, 'w', encoding='utf-8') as f:
