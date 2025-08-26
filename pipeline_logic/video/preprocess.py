@@ -5,6 +5,7 @@ import shutil
 from tqdm import tqdm
 import cv2
 from pathlib import Path
+import numpy as np 
 
 from scenedetect import SceneManager, open_video
 from scenedetect.detectors import ContentDetector
@@ -15,9 +16,7 @@ from ultralytics import YOLO
 #  segment & clip  #
 ####################
 
-def split_raw_to_segments(video_path, data_dir, seg_duration=5) -> str:
-    filename = os.path.splitext(os.path.basename(video_path))[0]
-    output_dir = os.path.join(data_dir, 'segments', filename)
+def split_video_to_segment(video_path, output_dir, seg_duration=2) -> str:
     os.makedirs(output_dir, exist_ok=True)
     output_template = os.path.join(output_dir, "%03d.mp4")
 
@@ -33,6 +32,20 @@ def split_raw_to_segments(video_path, data_dir, seg_duration=5) -> str:
         output_template
     ]
     subprocess.run(command, check=True)
+
+def split_raw_to_segments_folder(segment_dir, data_dir, seg_duration=2) -> str:
+    video_name = segment_dir.split('/')[-1]
+    output_dir = os.path.join(data_dir, 'segments', video_name)
+    os.makedirs(output_dir, exist_ok=True)
+    segment_paths = glob(os.path.join(segment_dir, '*.mp4'))
+    for s_path in segment_paths:
+        split_video_to_segment(s_path, output_dir, seg_duration)
+    return output_dir
+
+def split_raw_to_segments_single(video_path, data_dir, seg_duration=2) -> str:
+    filename = os.path.splitext(os.path.basename(video_path))[0]
+    output_dir = os.path.join(data_dir, 'segments', filename)
+    split_video_to_segment(video_path, output_dir, seg_duration)
     return output_dir
 
 def save_clip_with_sampling(segment_dir, data_dir, sample_rate=5) -> str:
@@ -58,20 +71,34 @@ def save_clip_with_sampling(segment_dir, data_dir, sample_rate=5) -> str:
 
         subprocess.run(command, check=True)
 
-
 ######################
 ##  Person Clip
 ######################
-def extract_person_clips(
-    video_path,
-    output_dir,
+def extract_person_clip_folder(
+    segment_dir, 
+    data_dir, 
     model_ckpt="yolov8n.pt",
     offset_ratio=0.2
 ):
+    video_name = segment_dir.split('/')[-1]
+    output_dir = os.path.join(data_dir, 'person_clip', video_name)
     os.makedirs(output_dir, exist_ok=True)
+    segment_paths = glob(os.path.join(segment_dir, '*.mp4'))
 
     model = YOLO(model_ckpt)
 
+    for s_path in segment_paths:
+        extract_person_clip(
+            s_path, output_dir,
+            model, offset_ratio
+        )
+
+def extract_person_clip(
+    video_path,
+    output_dir,
+    model,
+    offset_ratio=0.2
+):
     cap = cv2.VideoCapture(video_path)
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     fps = cap.get(cv2.CAP_PROP_FPS)
@@ -100,63 +127,66 @@ def extract_person_clips(
         return
 
     # Offset and clamp
+    box_frames = {}
     adjusted_boxes = []
-    for box in person_boxes:
+    for idx, box in enumerate(person_boxes):
         x1, y1, x2, y2 = box.astype(int)
         w, h = x2 - x1, y2 - y1
         dx, dy = int(w * offset_ratio), int(h * offset_ratio)
         x1, y1 = max(0, x1 - dx), max(0, y1 - dy)
         x2, y2 = min(width, x2 + dx), min(height, y2 + dy)
+        if (x2-x1)%2!=0:
+            x2-=1 
+        if (y2-y1)%2!=0:
+            y2-=1
         adjusted_boxes.append((x1, y1, x2, y2))
-
-    # Prepare temp dirs
-    temp_root = os.path.join(output_dir, "_temp")
-    if os.path.exists(temp_root):
-        shutil.rmtree(temp_root)
-    os.makedirs(temp_root)
-
-    temp_dirs = []
-    for i in range(len(adjusted_boxes)):
-        td = os.path.join(temp_root, f"person_{i}")
-        os.makedirs(td)
-        temp_dirs.append(td)
+        box_frames[idx] = []
 
     # Extract and save frames
     cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
     frame_idx = 0
-    with tqdm(total=total_frames, desc="Cropping frames") as pbar:
-        while True:
-            ret, frame = cap.read()
-            if not ret:
-                break
-            for i, (x1, y1, x2, y2) in enumerate(adjusted_boxes):
-                crop = frame[y1:y2, x1:x2]
-                out_path = os.path.join(temp_dirs[i], f"frame_{frame_idx:05d}.jpg")
-                cv2.imwrite(out_path, crop)
-            frame_idx += 1
-            pbar.update(1)
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            break
+        for idx, (x1, y1, x2, y2) in enumerate(adjusted_boxes):
+            crop = frame[y1:y2, x1:x2]
+            box_frames[idx].append(np.array(crop))
+        frame_idx += 1
 
     cap.release()
 
     # Convert to video via ffmpeg
-    for i, temp_dir in enumerate(temp_dirs):
-        output_path = os.path.join(output_dir, f"person_{i}.mp4")
-        ffmpeg_cmd = [
+    video_name = os.path.splitext(os.path.basename(video_path))[0]
+    for idx in box_frames.keys():
+        output_path = os.path.join(output_dir, f"{video_name}_person_{idx}.mp4")
+        x1, y1, x2, y2 = adjusted_boxes[idx] 
+        w, h = x2 - x1, y2 - y1
+        
+        cmd = [
             "ffmpeg", "-y",
-            "-framerate", "30",
-            "-i", f"{temp_dir}/frame_%05d.jpg",
-            "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2",
+            "-f", "rawvideo",
+            "-vcodec", "rawvideo",
+            "-pix_fmt", "rgb24",
+            "-s", f"{w}x{h}",
+            "-r", str(fps),
+            "-i", "-",
+            "-an",
             "-c:v", "libx264",
+            "-preset", "ultrafast",
             "-pix_fmt", "yuv420p",
-            "-crf", "23",
-            str(output_path)
+            output_path
         ]
-        subprocess.run(ffmpeg_cmd, check=True)
-        print(f"[SAVED] {output_path}")
-
-    shutil.rmtree(temp_root)
-    print("[DONE] All person clips saved.")
-
+        
+        process = subprocess.Popen(
+            cmd, 
+            stdin=subprocess.PIPE
+        )
+        for frame in box_frames[idx]:
+            assert frame.dtype == np.uint8
+            process.stdin.write(frame.tobytes())
+        process.stdin.close()
+        process.wait()
 
 
 ####################
@@ -164,13 +194,16 @@ def extract_person_clips(
 ####################
 
 def extract_scenes_with_split(
-    input_path: str,
-    output_dir: str,
+    video_path: str,
+    data_dir: str,
     threshold: float = 30.0,
     min_scene_len: int = 15
 ):
+    filename = os.path.splitext(os.path.basename(video_path))[0]
+    output_dir = os.path.join(data_dir, 'scene_segments', filename)
     os.makedirs(output_dir, exist_ok=True)
-    video = open_video(input_path)
+
+    video = open_video(video_path)
 
     # 씬 매니저 설정
     scene_manager = SceneManager()
@@ -184,8 +217,17 @@ def extract_scenes_with_split(
 
     # FFMPEG로 분할 저장 (파일명 자동 지정: <input_basename>_Scene-001.mp4 형식)
     split_video_ffmpeg(
-        input_video_path=input_path,
+        input_video_path=video_path,
         scene_list=scene_list,
         output_dir=Path(output_dir),
         show_progress=True
     )
+    return output_dir
+
+
+if __name__ == "__main__":
+    extract_person_clip_folder(
+    "/Users/djyun/project/data_crawl/data/video/segments/RAW VIDEO Surveillance camera shows victim fight off armed suspects", 
+    "/Users/djyun/project/data_crawl/data/video", 
+    model_ckpt="yolov8n.pt",
+    offset_ratio=0.2)
